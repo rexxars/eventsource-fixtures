@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>EventSource-Fixture</title>
+    <style>
+      html,
+      body,
+      #tests {
+        margin: 0;
+        padding: 0;
+      }
+
+      #tests .test-name {
+        margin: 0;
+        font-family: monospace;
+        font-size: 18px;
+      }
+
+      #tests article {
+        float: left;
+        width: 300px;
+        background: #ccc;
+        border: 1px solid #000;
+        margin: 5px 0 0 5px;
+      }
+
+      #tests pre {
+        height: 200px;
+        font-family: monospace;
+        white-space: pre-line;
+        overflow-y: scroll;
+      }
+
+      #tests article.error {
+        background: #f00;
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tests"></div>
+
+    <script>
+      const testEl = document.getElementById('tests')
+
+      const tests = [
+        testBasic,
+        testTime,
+        testHeaders,
+        testIdentified,
+        testHeartbeats,
+        testSilence,
+        testComments,
+        testCommentsMixed,
+        testMultiLine,
+        testMultiByte,
+        testMultiByteEmptyLine,
+        testByteOrderMark,
+        testCarriageReturn,
+        testLineFeed,
+        testCarriageReturnLineFeed,
+        testEmptyEvents,
+        testDataFieldParsing,
+        testFieldParsing,
+        testInvalidRetry,
+        testEmptyRetry,
+        testUnknownFields,
+        testHugeMessage,
+      ]
+
+      function testBasic(write) {
+        return expectMessages(write, '/basic', 5)
+      }
+
+      function testTime(write) {
+        return expectMessages(write, '/time', 5, 'time')
+      }
+
+      function testHeaders(write) {
+        return expectMessages(write, '/headers', 0, 'message', 'headers').then(({data}) => {
+          const headers = JSON.parse(data)
+          for (const header in headers) {
+            write(`${header}: ${headers[header]}`)
+          }
+
+          if (!headers.accept || !headers.accept.includes('text/event-stream')) {
+            throw new Error('Expected `Accept: text/event-stream`')
+          }
+        })
+      }
+
+      function testIdentified(write) {
+        return expectMessages(write, '/identified', 6, 'tick')
+      }
+
+      function testHeartbeats(write) {
+        return expectMessages(write, '/heartbeats', 5)
+      }
+
+      function testSilence(write) {
+        return new Promise((resolve, reject) => {
+          write('Testing silence, not expecting any events')
+          const start = Date.now()
+          const threshold = 250
+          const es = new EventSource('/silence')
+          es.onerror = (err) => {
+            es.close()
+
+            const time = Date.now() - start
+            const diff = Math.abs(time - 2500)
+
+            if (diff < threshold) {
+              write(`Closed after ${time}ms - expected`)
+              resolve()
+              return
+            }
+
+            write(`Closed after ${time}ms - check console for error`)
+            console.error(err)
+            reject(err)
+          }
+        })
+      }
+
+      function testMultiLine(write) {
+        return expectMessages(write, '/multiline', 2, 'stock')
+      }
+
+      function testMultiByte(write) {
+        return expectMessages(write, '/multibyte', 14)
+      }
+
+      function testMultiByteEmptyLine(write) {
+        return expectMessages(write, '/multibyte-empty-line', 1)
+      }
+
+      function testByteOrderMark(write) {
+        return expectMessages(write, '/bom', 2)
+      }
+
+      function testCarriageReturn(write) {
+        return expectMessages(write, '/cr', 2)
+      }
+
+      function testLineFeed(write) {
+        return expectMessages(write, '/lf', 2)
+      }
+
+      function testCarriageReturnLineFeed(write) {
+        return expectMessages(write, '/crlf', 2)
+      }
+
+      function testComments(write) {
+        return expectMessages(write, '/comments', 5)
+      }
+
+      function testCommentsMixed(write) {
+        return expectMessages(write, '/comments-mixed', 4, 'message', 'error').then(
+          ({messages}) => {
+            if (messages.join('\n') !== '1\n2\n3\n4') {
+              throw new Error(`Incorrectly parsed value: ${JSON.stringify(messages[0])}`)
+            }
+          }
+        )
+      }
+
+      function testEmptyEvents(write) {
+        return expectMessages(write, '/empty-events', 1)
+      }
+
+      function testDataFieldParsing(write) {
+        return expectMessages(write, '/data-field-parsing', 3).then(({messages}) => {
+          if (JSON.stringify(messages) !== JSON.stringify(['', '\n', 'test'])) {
+            throw new Error(`Incorrectly parsed value: ${JSON.stringify(messages)}`)
+          }
+        })
+      }
+
+      function testFieldParsing(write) {
+        return expectMessages(write, '/field-parsing', 1).then(({messages}) => {
+          if (JSON.stringify(messages[0]) !== JSON.stringify('\0\n 2\n1\n3\n\n\n4')) {
+            throw new Error(`Incorrectly parsed value: ${JSON.stringify(messages[0])}`)
+          }
+        })
+      }
+
+      function testInvalidRetry(write) {
+        return new Promise((resolve, reject) => {
+          write('Testing retry, expecting ~1s reconnect time')
+          let initialConnect
+          let received = 0
+          const threshold = 250
+          const es = new EventSource('/invalid-retry')
+          es.onmessage = (evt) => {
+            write(`Message: ${evt.data}`)
+            if (++received === 2) {
+              es.close()
+              resolve()
+            }
+          }
+          es.onopen = () => {
+            if (!initialConnect) {
+              initialConnect = Date.now()
+              return
+            }
+
+            const time = Date.now() - initialConnect
+            const diff = Math.abs(time - 1000)
+            if (diff > threshold) {
+              es.close()
+              write(`Reconnect after ${time}ms - out of bounds`)
+              reject(new Error(`Reconnect after ${time}ms - out of bounds`))
+              return
+            }
+
+            write(`Reconnect after ${time}ms - expected`)
+            write('Waiting for second message to arrive.')
+          }
+          es.onerror = (err) => {
+            write('Disconnected (expected)')
+          }
+        })
+      }
+
+      function testEmptyRetry(write) {
+        return new Promise((resolve, reject) => {
+          write('Testing retry, expecting ~50ms reconnect time')
+          let lastConnected
+          const threshold = 250
+          const es = new EventSource('/empty-retry')
+          es.onmessage = (evt) => {
+            console.log(evt, es)
+            write(`Message: ${evt.data}`)
+            if ('✅' !== evt.data) {
+              return
+            }
+
+            es.close()
+            resolve()
+          }
+          es.onopen = () => {
+            if (!lastConnected) {
+              lastConnected = Date.now()
+              return
+            }
+
+            const time = Date.now() - lastConnected
+            const diff = Math.abs(time - 500)
+            if (diff > threshold) {
+              es.close()
+              write(`Reconnect after ${time}ms - out of bounds. Note:`)
+              reject(`Reconnect after ${time}ms - out of bounds`)
+              return
+            }
+
+            write(`Reconnect after ${time}ms - expected`)
+            lastConnected = Date.now()
+          }
+          es.onerror = (err) => {
+            write('Disconnected (expected)')
+          }
+        })
+      }
+
+      function testUnknownFields(write) {
+        return expectMessages(write, '/unknown-fields', 1).then(({messages}) => {
+          if (JSON.stringify(messages[0]) !== JSON.stringify('test\n\ntest')) {
+            throw new Error(`Incorrectly parsed value: ${JSON.stringify(messages[0])}`)
+          }
+        })
+      }
+
+      function testHugeMessage(write) {
+        return expectMessages(write, '/huge-message', 1).then(({messages, data}) => {
+          const msg = messages[0]
+          if (typeof window.md5 === 'function') {
+            const received = window.md5(msg)
+
+            if (received !== data) {
+              throw new Error(
+                `Received data did not checksum to expected hash: ${received} vs ${data}`
+              )
+            }
+          }
+        })
+      }
+
+      function expectMessages(write, endpoint, expected, type = 'message', doneEvent = 'done') {
+        return new Promise((resolve, reject) => {
+          const messages = []
+          let i = 0
+          const es = new EventSource(endpoint)
+          es.addEventListener(doneEvent, (evt) => {
+            es.close()
+            if (i === expected) {
+              resolve({messages, data: evt.data})
+            } else {
+              reject(new Error(`Expected ${expected} messages, got ${i}`))
+            }
+          })
+
+          es.addEventListener(type, (evt) => {
+            write(evt.data)
+            messages.push(evt.data)
+            i++
+          })
+        })
+      }
+
+      async function run() {
+        for (const test of tests) {
+          const article = document.createElement('article')
+          testEl.appendChild(article)
+
+          const title = document.createElement('h2')
+          title.classList.add('test-name')
+          title.textContent = test.name
+          article.appendChild(title)
+
+          const log = document.createElement('pre')
+          article.appendChild(log)
+
+          try {
+            await test((msg) => {
+              log.textContent += `${msg}\n`
+            })
+          } catch (err) {
+            log.textContent = `${err.message}\n${log.textContent}`
+            article.classList.add('error')
+          }
+        }
+      }
+
+      run()
+    </script>
+  </body>
+</html>
